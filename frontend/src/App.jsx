@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { bpmApi } from './api/bpmApi.js';
 import DynamicForm from './components/DynamicForm.jsx';
 import PaginatedContainer from './components/PaginatedContainer.jsx';
 import AdvancedSelector from './components/AdvancedSelector.jsx';
 import WorkflowPanel from './components/WorkflowPanel.jsx';
-import { seedState } from './metadata/seedState.js';
-
-const LS_KEY = 'BPM_REFACTOR_STATE_V1';
+import BackendDiagnostics from './components/Diagnostics/BackendDiagnostics.jsx';
+import { CONFIG, LOCAL_STORAGE_KEY } from './config/appConfig.js';
+import { seedState } from './data/seedState.js';
+import { API } from './services/bpmApi.js';
+import { loadLocalState } from './services/localStateStore.js';
+import { parseJsonSafe } from './utils/jsonUtils.js';
 
 export default function App() {
   const [state, setState] = useState(seedState);
@@ -17,11 +19,16 @@ export default function App() {
   const [validationReport, setValidationReport] = useState(null);
 
   useEffect(() => {
-    const local = localStorage.getItem(LS_KEY);
-    if (local) setState(JSON.parse(local));
-    bpmApi.init().then(remote => {
-      if (remote && remote.params) setState(remote);
-    }).catch(() => setMessage('後端尚未啟動，目前使用前端 seedState。'));
+    const local = loadLocalState() || parseJsonSafe(localStorage.getItem(LOCAL_STORAGE_KEY), null);
+    if (local) setState(local);
+
+    if (!CONFIG.USE_REAL_BACKEND) return;
+
+    API.getInitData()
+      .then(remote => {
+        if (remote && remote.params) setState(remote);
+      })
+      .catch(() => setMessage('後端尚未啟動，目前使用前端 seedState。'));
   }, []);
 
   const orgOptions = useMemo(() => {
@@ -39,9 +46,8 @@ export default function App() {
   const syncState = async () => {
     setMessage('同步中...');
     try {
-      await bpmApi.sync(state);
-      localStorage.setItem(LS_KEY, JSON.stringify(state));
-      setMessage('✅ 已同步到後端/本機暫存');
+      const result = await API.syncFullState(state, { allowLocalFallback: false });
+      setMessage(result.message || '✅ 已成功同步到 SQL Server 後端');
     } catch (err) {
       setMessage(`❌ 同步失敗：${err.message}`);
     }
@@ -49,7 +55,7 @@ export default function App() {
 
   const validateState = async () => {
     try {
-      const report = await bpmApi.validate(state);
+      const report = await API.validate(state);
       setValidationReport(report);
       setMessage(report.success ? '✅ Metadata 驗證通過' : '⚠️ Metadata 有問題，請看下方報告');
     } catch (err) {
@@ -59,7 +65,7 @@ export default function App() {
 
   const handleTransition = useCallback(async (t) => {
     try {
-      await bpmApi.canTransition({ workflowCode: 'PURCHASE', from: t.from, to: t.to, role });
+      await API.canTransition({ workflowCode: 'PURCHASE', from: t.from, to: t.to, role });
       setCurrentState(t.to);
       setMessage(`✅ 狀態已流轉：${t.from} -> ${t.to}`);
     } catch (err) {
@@ -86,6 +92,8 @@ export default function App() {
       </header>
 
       {message && <div className="toast">{message}</div>}
+
+      <BackendDiagnostics getCurrentState={() => state} />
 
       <section className="grid-two">
         <DynamicForm schema={state.formSchemas?.BPM_FORM || []} data={formData} onChange={setFormData} context={context} />
