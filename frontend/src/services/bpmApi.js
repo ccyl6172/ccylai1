@@ -1,39 +1,49 @@
-const DEFAULT_API_BASE_URL = 'http://localhost:7000/api';
-const LOCAL_STORAGE_KEY = 'BpmEnterprise_DualTreeState_v3145';
+import { CONFIG } from '../config/appConfig.js';
+import { saveLocalState } from './localStateStore.js';
 
-export const API_BASE_URL =
-  (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL)
-    ? import.meta.env.VITE_API_BASE_URL
-    : DEFAULT_API_BASE_URL;
+export const API_BASE_URL = CONFIG.REAL_API_BASE_URL;
 
 async function parseJsonResponse(response) {
   const text = await response.text();
   if (!text) return null;
+
   try {
     return JSON.parse(text);
-  } catch (error) {
-    throw new Error(`後端回傳不是合法 JSON：${text.substring(0, 300)}`);
+  } catch {
+    throw new Error(`Backend returned invalid JSON: ${text.substring(0, 300)}`);
   }
+}
+
+async function requestJson(path, options = {}) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: {
+      Accept: 'application/json',
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.headers || {})
+    },
+    ...options
+  });
+
+  const data = await parseJsonResponse(response);
+
+  if (!response.ok || data?.success === false) {
+    throw new Error(data?.error || data?.message || `HTTP ${response.status}`);
+  }
+
+  return data;
 }
 
 export async function checkBackendHealth() {
   const startedAt = performance.now();
+
   try {
-    const response = await fetch(`${API_BASE_URL}/init`, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      cache: 'no-store'
-    });
-
-    const elapsedMs = Math.round(performance.now() - startedAt);
-    const data = await parseJsonResponse(response);
-
+    const data = await requestJson('/init', { method: 'GET', cache: 'no-store' });
     return {
-      ok: response.ok,
-      status: response.status,
-      elapsedMs,
+      ok: true,
+      status: 200,
+      elapsedMs: Math.round(performance.now() - startedAt),
       data,
-      message: response.ok ? '後端連線正常' : `後端回應錯誤：HTTP ${response.status}`
+      message: '後端連線正常'
     };
   } catch (error) {
     return {
@@ -47,7 +57,7 @@ export async function checkBackendHealth() {
   }
 }
 
-export async function getInitData({ fallbackToLocalStorage = true } = {}) {
+export async function getInitData({ fallbackToLocalStorage = false } = {}) {
   const health = await checkBackendHealth();
 
   if (health.ok && health.data && Object.keys(health.data).length > 0) {
@@ -59,51 +69,23 @@ export async function getInitData({ fallbackToLocalStorage = true } = {}) {
     };
   }
 
-  if (fallbackToLocalStorage) {
-    const localRaw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (localRaw) {
-      try {
-        return {
-          success: true,
-          source: 'localStorage',
-          data: JSON.parse(localRaw),
-          backendHealth: health,
-          message: '後端目前沒有資料，已改從 localStorage 載入'
-        };
-      } catch {
-        localStorage.removeItem(LOCAL_STORAGE_KEY);
-      }
-    }
-  }
-
   return {
     success: true,
     source: health.ok ? 'backend-empty' : 'empty',
     data: null,
     backendHealth: health,
-    message: health.ok ? '後端已連線，但 App_SysConfig 目前沒有資料' : health.message
+    message: health.ok ? '後端已連線，但目前沒有完整 metadata' : health.message
   };
 }
 
 export async function syncFullState(fullState, { allowLocalFallback = false } = {}) {
   try {
-    const response = await fetch(`${API_BASE_URL}/sync`, {
+    const data = await requestJson('/sync', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json'
-      },
       body: JSON.stringify(fullState)
     });
 
-    const data = await parseJsonResponse(response);
-
-    if (!response.ok || data?.success === false) {
-      const errorMessage = data?.error || `HTTP ${response.status}`;
-      throw new Error(errorMessage);
-    }
-
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(fullState));
+    saveLocalState(fullState);
 
     return {
       success: true,
@@ -113,12 +95,12 @@ export async function syncFullState(fullState, { allowLocalFallback = false } = 
     };
   } catch (error) {
     if (allowLocalFallback) {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(fullState));
+      saveLocalState(fullState);
       return {
         success: true,
         persistedTo: 'localStorage',
         error: error.message,
-        message: `後端同步失敗，已暫存到瀏覽器 localStorage：${error.message}`
+        message: `後端同步失敗，已暫存到 localStorage：${error.message}`
       };
     }
 
@@ -148,4 +130,31 @@ export const testPayload = {
     }
   ],
   systemSettings: {}
+};
+
+export const API = {
+  getInitData: async () => {
+    const result = await getInitData();
+    return result.data;
+  },
+  syncFullState,
+  validate: async (state) => requestJson('/validate', {
+    method: 'POST',
+    body: JSON.stringify(state)
+  }),
+  canTransition: async (payload) => requestJson('/can-transition', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  }),
+  deleteParamCategory: async (categoryId, sysKey, isGlobal) => requestJson('/deleteCategory', {
+    method: 'POST',
+    body: JSON.stringify({ categoryId, sysKey, isGlobal })
+  })
+};
+
+export const bpmApi = {
+  init: API.getInitData,
+  sync: syncFullState,
+  validate: API.validate,
+  canTransition: API.canTransition
 };
